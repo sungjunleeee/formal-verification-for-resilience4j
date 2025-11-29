@@ -1,0 +1,6 @@
+# Build artifacts
+classes/
+sources.txt
+
+# OS generated files
+.DS_Store
