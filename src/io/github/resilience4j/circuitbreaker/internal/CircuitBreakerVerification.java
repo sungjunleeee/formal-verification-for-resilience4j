@@ -54,7 +54,7 @@ public class CircuitBreakerVerification {
         for (int i = 0; i < 10; i++) {
             CircuitBreaker.State currentState = circuitBreaker.getState();
 
-            // Property: No Illegal Transitions
+            // Property: No Illegal Transitions (Safety Property)
             if (previousState == CircuitBreaker.State.CLOSED && currentState == CircuitBreaker.State.HALF_OPEN) {
                 assert false : "Safety Violated: Illegal transition from CLOSED to HALF_OPEN";
             }
@@ -62,12 +62,12 @@ public class CircuitBreakerVerification {
                 assert false : "Safety Violated: Illegal transition from OPEN to CLOSED";
             }
 
-            checkFunctionalProperties(circuitBreaker);
+            checkFunctionalProperties(circuitBreaker, previousState);
 
             // Simulate Request
             boolean permission = circuitBreaker.tryAcquirePermission();
 
-            // Property: Open State Protection
+            // Property: Open State Protection (Safety Property)
             if (circuitBreaker.getState() == CircuitBreaker.State.OPEN) {
                 assert !permission : "Safety Violated: Acquired permission while in OPEN state";
             }
@@ -85,29 +85,35 @@ public class CircuitBreakerVerification {
                 clock.advance(1100);
             }
 
-            // Property: Half-Open Failure
+            // Property: Half-Open Failure (~Not implemented yet)
             // If we were HALF_OPEN and failed, we must transition to OPEN
             if (currentState == CircuitBreaker.State.HALF_OPEN && !permission) {
                 // Note: This logic is tricky because permission might be denied for other
-                // reasons.
-                // Better to check state after operation.
+                // reasons. Better to check state after operation.
             }
 
             // Check Functional Properties after state updates
-            checkFunctionalProperties(circuitBreaker);
+            checkFunctionalProperties(circuitBreaker, previousState);
 
             previousState = currentState;
         }
     }
 
-    private static void checkFunctionalProperties(CircuitBreakerStateMachine circuitBreaker) {
+    private static void checkFunctionalProperties(CircuitBreakerStateMachine circuitBreaker, CircuitBreaker.State previousState) {
         CircuitBreaker.State state = circuitBreaker.getState();
         float failureRate = circuitBreaker.getMetrics().getFailureRate();
 
-        // Property: Failure Threshold
-        if (state == CircuitBreaker.State.CLOSED && failureRate > 50.0f) {
-            assert false : "Functional Logic Violated: Remained CLOSED despite failure rate > 50%";
+
+        // Property: Failure Threshold (Functional Correctness Property)
+        if (previousState == CircuitBreaker.State.CLOSED){
+          if (state == CircuitBreaker.State.CLOSED && failureRate >= 50.0f) {
+            assert false : "Functional Logic Violated: Remained CLOSED despite failure rate >= 50%";
+          }
+          if (state != CircuitBreaker.State.CLOSED && failureRate < 50.0f) {
+                assert false : "Functional Logic Violated: Switched from CLOSED to " + state + " despite failure rate < 50%";
+          }
         }
+        
 
         // Property: Half-Open Limits (Implicitly checked by state transitions, but
         // could be explicit)
