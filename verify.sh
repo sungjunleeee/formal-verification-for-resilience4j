@@ -16,4 +16,4 @@ jbmc -cp classes io.github.resilience4j.circuitbreaker.internal.CircuitBreakerVe
   --unwind 10 \
   --unwinding-assertions \
   --java-assume-inputs-non-null \
-  --trace
+  --trace | tee trace.log
