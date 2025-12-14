@@ -54,7 +54,7 @@ public class CircuitBreakerVerification {
         for (int i = 0; i < 10; i++) {
             CircuitBreaker.State currentState = circuitBreaker.getState();
 
-            // Property: No Illegal Transitions (Safety Property)
+            // A1. Property: No Illegal Transitions (Safety Property)
             if (previousState == CircuitBreaker.State.CLOSED && currentState == CircuitBreaker.State.HALF_OPEN) {
                 assert false : "Safety Violated: Illegal transition from CLOSED to HALF_OPEN";
             }
@@ -67,7 +67,7 @@ public class CircuitBreakerVerification {
             // Simulate Request
             boolean permission = circuitBreaker.tryAcquirePermission();
 
-            // Property: Open State Protection (Safety Property)
+            // A2. Property: Open State Protection (Safety Property)
             if (circuitBreaker.getState() == CircuitBreaker.State.OPEN) {
                 assert !permission : "Safety Violated: Acquired permission while in OPEN state";
             }
@@ -99,21 +99,21 @@ public class CircuitBreakerVerification {
         }
     }
 
-    private static void checkFunctionalProperties(CircuitBreakerStateMachine circuitBreaker, CircuitBreaker.State previousState) {
+    private static void checkFunctionalProperties(CircuitBreakerStateMachine circuitBreaker,
+            CircuitBreaker.State previousState) {
         CircuitBreaker.State state = circuitBreaker.getState();
         float failureRate = circuitBreaker.getMetrics().getFailureRate();
 
-
         // Property: Failure Threshold (Functional Correctness Property)
-        if (previousState == CircuitBreaker.State.CLOSED){
-          if (state == CircuitBreaker.State.CLOSED && failureRate >= 50.0f) {
-            assert false : "Functional Logic Violated: Remained CLOSED despite failure rate >= 50%";
-          }
-          if (state != CircuitBreaker.State.CLOSED && failureRate < 50.0f) {
-                assert false : "Functional Logic Violated: Switched from CLOSED to " + state + " despite failure rate < 50%";
-          }
+        if (previousState == CircuitBreaker.State.CLOSED) {
+            if (state == CircuitBreaker.State.CLOSED && failureRate >= 50.0f) {
+                assert false : "Functional Logic Violated: Remained CLOSED despite failure rate >= 50%";
+            }
+            if (state != CircuitBreaker.State.CLOSED && failureRate < 50.0f) {
+                assert false
+                        : "Functional Logic Violated: Switched from CLOSED to " + state + " despite failure rate < 50%";
+            }
         }
-        
 
         // Property: Half-Open Limits (Implicitly checked by state transitions, but
         // could be explicit)
