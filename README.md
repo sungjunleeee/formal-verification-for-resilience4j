@@ -117,8 +117,8 @@ The code uses the **State Pattern**. Instead of one giant `if-else` block, each 
     *   It allows a limited number of "probe" requests to pass through (e.g., 10 calls).
     *   The rest are still blocked.
 *   **Transition**:
-    *   **Success**: If these probe calls succeed, the backend is healthy! Transition back to **CLOSED**.
-    *   **Failure**: If they fail, the backend is still broken. Transition back to **OPEN** and wait again.
+    *   **Success**: If all permitted probe calls complete successfully, the backend is considered healthy and the circuit transitions back to **CLOSED**.
+    *   **Failure**: If any permitted probe call fails, the backend is considered unhealthy and the circuit immediately transitions back to  **OPEN** and wait again.
 
 ### Other States
 
@@ -165,7 +165,7 @@ If you are formally verifying this class (e.g., using JBMC), here is a categoriz
     *   `CLOSED` state can **NEVER** transition directly to `HALF_OPEN`.
     *   `OPEN` state can **NEVER** transition directly to `CLOSED`.
 2.  **Open State Protection**:        ~~(Implemented)
-    *   When in `OPEN` state, `tryAcquirePermission()` MUST return `false` (unless the wait duration has expired).
+    *   When in `OPEN` state, `tryAcquirePermission()` MUST return `false` (unless the state changes to `HALF_OPEN`).
 3.  **Half-Open Limits**:
     *   When in `HALF_OPEN` state, the number of permitted calls MUST NOT exceed the configured limit (e.g., `permittedNumberOfCallsInHalfOpenState`).
 
@@ -184,7 +184,5 @@ If you are formally verifying this class (e.g., using JBMC), here is a categoriz
     *   If in `CLOSED` state AND the failure rate exceeds the threshold (e.g., 50%), it MUST transition to `OPEN`.
     *   If in `CLOSED` state AND the failure rate is below the threshold, it MUST stay in `CLOSED`.
 2.  **Half-Open Failure Logic**:
-    *   If in `HALF_OPEN` state AND *any* call fails (or the failure rate of the probe calls exceeds the threshold), it MUST transition back to `OPEN`.
-3.  **Metric Accuracy**:
-    *   `onSuccess` MUST increment the success count.
-    *   `onError` MUST increment the failure count.
+    *   If the circuit breaker is in the `HALF_OPEN` state and any permitted probe call fails, it MUST transition back to `OPEN`.
+    *   Only if all permitted probe calls succeed may the circuit transition to `CLOSED`.

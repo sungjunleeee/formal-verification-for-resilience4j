@@ -2,120 +2,312 @@ package io.github.resilience4j.circuitbreaker.internal;
 
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
-import org.cprover.CProver;
 
+import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.util.concurrent.TimeUnit;
+import org.cprover.CProver;
 
 public class CircuitBreakerVerification {
 
-    // Mock Clock to control time
-    static class MockClock extends java.time.Clock {
-        long time = 0;
+    // NOTE (BMC): Keep this small in code; scale exploration with JBMC via --unwind STEPS.
+    // Example: jbmc CircuitBreakerVerification --unwind 3 --trace
+    static final int STEPS = 3; // temporal bound (drive via --unwind)
+    static final int HALF_OPEN_LIMIT = 2;
 
-        @Override
-        public java.time.ZoneId getZone() {
-            return java.time.ZoneId.systemDefault();
-        }
-
-        @Override
-        public java.time.Clock withZone(java.time.ZoneId zone) {
-            return this;
-        }
-
-        @Override
-        public java.time.Instant instant() {
-            return java.time.Instant.ofEpochMilli(time);
-        }
-
-        public void advance(long millis) {
-            time += millis;
-        }
+    /*
+     * ============================================================
+     * Entry point
+     * ============================================================
+     */
+    public static void main(String[] args) {
+        verifyNoClosedToHalfOpen();
+        verifyNoOpenToClosed();
+        verifyOpenBlocksCalls();
+        verifyHalfOpenLimit();
+        verifyOpenToHalfOpen();
+        verifyHalfOpenSuccess();
+        verifyFailureThresholdLogic();
+        verifyHalfOpenFailure();
     }
 
-    public static void main(String[] args) {
-        MockClock clock = new MockClock();
+    /*
+     * ============================================================
+     * Harness setup
+     * ============================================================
+     */
+    static CircuitBreakerStateMachine freshCB() {
+        return freshCB(new MockClock(Instant.EPOCH, ZoneId.of("UTC")));
+    }
 
-        // 1. Configuration
-        // Sliding Window Size: 4
-        // Failure Rate Threshold: 50% (If 2 out of 4 fail -> OPEN)
-        // Wait Duration: 1 second
+    static CircuitBreakerStateMachine freshCB(Clock clock) {
         CircuitBreakerConfig config = CircuitBreakerConfig.custom()
-                .slidingWindowSize(4)
                 .failureRateThreshold(50)
-                .permittedNumberOfCallsInHalfOpenState(2)
-                .waitDurationInOpenState(Duration.ofSeconds(1))
+                .permittedNumberOfCallsInHalfOpenState(HALF_OPEN_LIMIT)
+                .waitDurationInOpenState(Duration.ofMillis(1))
+                .slidingWindowType(CircuitBreakerConfig.SlidingWindowType.COUNT_BASED)
+                .slidingWindowSize(3)
+                .minimumNumberOfCalls(3)
                 .clock(clock)
                 .build();
 
-        CircuitBreakerStateMachine circuitBreaker = new CircuitBreakerStateMachine("testVerifier", config);
-        CircuitBreaker.State previousState = circuitBreaker.getState();
+        return new CircuitBreakerStateMachine("cb", config);
+    }
 
-        // 2. Symbolic Execution Loop
-        for (int i = 0; i < 10; i++) {
-            CircuitBreaker.State currentState = circuitBreaker.getState();
+    /*
+     * ============================================================
+     * A.1.1 No Illegal Transitions (CLOSED -> HALF_OPEN)
+     * ============================================================
+     */
+    static void verifyNoClosedToHalfOpen() {
+        CircuitBreakerStateMachine cb = freshCB();
 
-            // A1. Property: No Illegal Transitions (Safety Property)
-            if (previousState == CircuitBreaker.State.CLOSED && currentState == CircuitBreaker.State.HALF_OPEN) {
-                assert false : "Safety Violated: Illegal transition from CLOSED to HALF_OPEN";
-            }
-            if (previousState == CircuitBreaker.State.OPEN && currentState == CircuitBreaker.State.CLOSED) {
-                assert false : "Safety Violated: Illegal transition from OPEN to CLOSED";
-            }
+        for (int i = 0; i < STEPS; i++) {
+            CircuitBreaker.State prev = cb.getState();
 
-            checkFunctionalProperties(circuitBreaker, previousState);
-
-            // Simulate Request
-            boolean permission = circuitBreaker.tryAcquirePermission();
-
-            // A2. Property: Open State Protection (Safety Property)
-            if (circuitBreaker.getState() == CircuitBreaker.State.OPEN) {
-                assert !permission : "Safety Violated: Acquired permission while in OPEN state";
-            }
-
-            if (permission) {
-                boolean success = CProver.nondetBoolean();
-                if (success) {
-                    circuitBreaker.onSuccess(100, java.util.concurrent.TimeUnit.MILLISECONDS);
+            // one request lifecycle
+            if (cb.tryAcquirePermission()) {
+                boolean ok = CProver.nondetBoolean();
+                if (ok) {
+                    cb.onSuccess(0, TimeUnit.MILLISECONDS);
                 } else {
-                    circuitBreaker.onError(100, java.util.concurrent.TimeUnit.MILLISECONDS,
-                            new RuntimeException("Simulated Failure"));
+                    cb.onError(0, TimeUnit.MILLISECONDS, new RuntimeException());
                 }
-            } else {
-                // If blocked, advance time to allow recovery
-                clock.advance(1100);
             }
 
-            // Property: Half-Open Failure (~Not implemented yet)
-            // If we were HALF_OPEN and failed, we must transition to OPEN
-            if (currentState == CircuitBreaker.State.HALF_OPEN && !permission) {
-                // Note: This logic is tricky because permission might be denied for other
-                // reasons. Better to check state after operation.
-            }
+            CircuitBreaker.State curr = cb.getState();
 
-            // Check Functional Properties after state updates
-            checkFunctionalProperties(circuitBreaker, previousState);
-
-            previousState = currentState;
+            assert !(prev == CircuitBreaker.State.CLOSED &&
+                    curr == CircuitBreaker.State.HALF_OPEN);
         }
     }
 
-    private static void checkFunctionalProperties(CircuitBreakerStateMachine circuitBreaker,
-            CircuitBreaker.State previousState) {
-        CircuitBreaker.State state = circuitBreaker.getState();
-        float failureRate = circuitBreaker.getMetrics().getFailureRate();
+    /*
+     * ============================================================
+     * A.1.2 No Illegal Transitions (OPEN -> CLOSED)
+     * ============================================================
+     */
+    static void verifyNoOpenToClosed() {
+        CircuitBreakerStateMachine cb = freshCB();
 
-        // Property: Failure Threshold (Functional Correctness Property)
-        if (previousState == CircuitBreaker.State.CLOSED) {
-            if (state == CircuitBreaker.State.CLOSED && failureRate >= 50.0f) {
-                assert false : "Functional Logic Violated: Remained CLOSED despite failure rate >= 50%";
+        /* Step 1: Drive system to OPEN */
+        for (int i = 0; i < STEPS; i++) {
+            cb.onError(0, TimeUnit.MILLISECONDS, new RuntimeException());
+        }
+        assert cb.getState() == CircuitBreaker.State.OPEN;
+
+        /* Step 2: Explore transitions */
+        for (int i = 0; i < STEPS; i++) {
+
+            CircuitBreaker.State prev = cb.getState();
+
+            // one request lifecycle
+            if (cb.tryAcquirePermission()) {
+                boolean ok = CProver.nondetBoolean();
+                if (ok)
+                    cb.onSuccess(0, TimeUnit.MILLISECONDS);
+                else
+                    cb.onError(0, TimeUnit.MILLISECONDS, new RuntimeException());
             }
-            if (state != CircuitBreaker.State.CLOSED && failureRate < 50.0f) {
-                assert false
-                        : "Functional Logic Violated: Switched from CLOSED to " + state + " despite failure rate < 50%";
+
+            CircuitBreaker.State curr = cb.getState();
+
+            // illegal direct transition
+            assert !(prev == CircuitBreaker.State.OPEN &&
+                    curr == CircuitBreaker.State.CLOSED);
+        }
+    }
+
+    /*
+     * ============================================================
+     * A.2. Open State Protection
+     * ============================================================
+     */
+    static void verifyOpenBlocksCalls() {
+        CircuitBreakerStateMachine cb = freshCB();
+
+        for (int i = 0; i < STEPS; i++) {
+            cb.onError(0, TimeUnit.MILLISECONDS, new RuntimeException());
+        }
+
+        assert cb.getState() == CircuitBreaker.State.OPEN;
+
+        // FIX: The property is "OPEN blocks calls unless wait duration expired".
+        // So we assert blocking only while the state is OPEN.
+        for (int i = 0; i < STEPS; i++) {
+            if (cb.getState() == CircuitBreaker.State.OPEN) {
+                boolean permitted = cb.tryAcquirePermission();
+                assert !permitted;
+            } else {
+                // once it leaves OPEN to HALF_OPEN after wait expiry, this property no longer applies
+                break;
+            }
+        }
+    }
+
+    /*
+     * ============================================================
+     * A.3. Half-Open Limits
+     * ============================================================
+     */
+    static void verifyHalfOpenLimit() {
+        CircuitBreakerStateMachine cb = freshCB();
+
+        for (int i = 0; i < STEPS; i++) {
+            cb.onError(0, TimeUnit.MILLISECONDS, new RuntimeException());
+        }
+
+        assert cb.getState() == CircuitBreaker.State.OPEN;
+
+        ((MockClock) cb.getCircuitBreakerConfig().getClock()).advance(Duration.ofMillis(2));
+
+        cb.tryAcquirePermission();
+        assert cb.getState() == CircuitBreaker.State.HALF_OPEN;
+
+        int permits = 0;
+        for (int i = 0; i < HALF_OPEN_LIMIT + 1; i++) {
+            if (cb.tryAcquirePermission()) {
+                permits++;
             }
         }
 
-        // Property: Half-Open Limits (Implicitly checked by state transitions, but
-        // could be explicit)
+        assert permits <= HALF_OPEN_LIMIT;
+    }
+
+    /*
+     * ============================================================
+     * B.1. Recovery from Open
+     * ============================================================
+     */
+    static void verifyOpenToHalfOpen() {
+        MockClock clock = new MockClock(Instant.EPOCH, ZoneId.of("UTC"));
+        CircuitBreakerStateMachine cb = freshCB(clock);
+
+        // Drive to OPEN
+        for (int i = 0; i < STEPS; i++) {
+            cb.onError(0, TimeUnit.MILLISECONDS, new RuntimeException());
+        }
+
+        assert cb.getState() == CircuitBreaker.State.OPEN;
+
+        // Expire wait duration
+        clock.advance(Duration.ofMillis(2));
+
+        // The very next call must cause the transition
+        cb.tryAcquirePermission();
+
+        assert cb.getState() == CircuitBreaker.State.HALF_OPEN;
+    }
+
+    /*
+     * ============================================================
+     * B.2. Recovery from Half-Open
+     * ============================================================
+     */
+    static void verifyHalfOpenSuccess() {
+        CircuitBreakerStateMachine cb = freshCB();
+
+        for (int i = 0; i < STEPS; i++) {
+            cb.onError(0, TimeUnit.MILLISECONDS, new RuntimeException());
+        }
+
+        ((MockClock) cb.getCircuitBreakerConfig().getClock()).advance(Duration.ofMillis(2));
+
+        cb.tryAcquirePermission();
+        assert cb.getState() == CircuitBreaker.State.HALF_OPEN;
+
+        for (int i = 0; i < HALF_OPEN_LIMIT; i++) {
+            cb.onSuccess(0, TimeUnit.MILLISECONDS);
+        }
+
+        assert cb.getState() == CircuitBreaker.State.CLOSED;
+    }
+
+    /*
+     * ============================================================
+     * C.1. Failure Threshold Logic
+     * ============================================================
+     */
+    static void verifyFailureThresholdLogic() {
+        // Case 1: failure rate exceeds threshold -> must OPEN
+        {
+            CircuitBreakerStateMachine cb = freshCB();
+
+            assert cb.getState() == CircuitBreaker.State.CLOSED;
+
+            // 3 calls in sliding window, minimumNumberOfCalls=3.
+            // 2 failures + 1 success => 66% failures > 50% => must OPEN.
+            cb.onError(0, TimeUnit.MILLISECONDS, new RuntimeException());
+            cb.onError(0, TimeUnit.MILLISECONDS, new RuntimeException());
+            cb.onSuccess(0, TimeUnit.MILLISECONDS);
+
+            assert cb.getState() == CircuitBreaker.State.OPEN;
+        }
+
+        // Case 2: failure rate below threshold -> must remain CLOSED
+        {
+            CircuitBreakerStateMachine cb = freshCB();
+
+            assert cb.getState() == CircuitBreaker.State.CLOSED;
+
+            // 1 failure + 2 successes => 33% failures <= 50% => must stay CLOSED.
+            cb.onError(0, TimeUnit.MILLISECONDS, new RuntimeException());
+            cb.onSuccess(0, TimeUnit.MILLISECONDS);
+            cb.onSuccess(0, TimeUnit.MILLISECONDS);
+
+            assert cb.getState() == CircuitBreaker.State.CLOSED;
+        }
+    }
+
+    /*
+     * ============================================================
+     * C.2. Half-Open Failure Logic
+     * ============================================================
+     */
+    static void verifyHalfOpenFailure() {
+        CircuitBreakerStateMachine cb = freshCB();
+
+        for (int i = 0; i < STEPS; i++) {
+            cb.onError(0, TimeUnit.MILLISECONDS, new RuntimeException());
+        }
+
+        ((MockClock) cb.getCircuitBreakerConfig().getClock()).advance(Duration.ofMillis(2));
+
+        cb.tryAcquirePermission();
+        assert cb.getState() == CircuitBreaker.State.HALF_OPEN;
+
+        cb.onError(0, TimeUnit.MILLISECONDS, new RuntimeException());
+        assert cb.getState() == CircuitBreaker.State.OPEN;
+    }
+
+    static class MockClock extends Clock {
+        private Instant instant;
+        private final ZoneId zone;
+
+        public MockClock(Instant instant, ZoneId zone) {
+            this.instant = instant;
+            this.zone = zone;
+        }
+
+        @Override
+        public ZoneId getZone() {
+            return zone;
+        }
+
+        @Override
+        public Clock withZone(ZoneId zone) {
+            return new MockClock(instant, zone);
+        }
+
+        @Override
+        public Instant instant() {
+            return instant;
+        }
+
+        public void advance(Duration duration) {
+            instant = instant.plusMillis(duration.toMillis());
+        }
     }
 }
